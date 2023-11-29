@@ -22,6 +22,7 @@ use Bitrix\Iblock\PropertyTable;
 use Bitrix\Main\ORM\Fields\Relations\Reference;
 use Bitrix\Main\ORM\Query\Join;
 use Bitrix\Main\Type\DateTime;
+use Bitrix\Main\Web\Cookie;
 
 // welpodron:order.Receiver.add
 
@@ -303,6 +304,14 @@ class Receiver extends Controller
             $endDate = new DateTime($arDataValid['DATE_END'], 'Y-m-d', new \DateTimeZone('Europe/Moscow'));
             $endDate->setTime(0, 0);
 
+            if ($startDate > $endDate) {
+                $startDate = new DateTime($arDataValid['DATE_END'], 'Y-m-d', new \DateTimeZone('Europe/Moscow'));
+                $startDate->setTime(0, 0);
+
+                $endDate = new DateTime($arDataValid['DATE_START'], 'Y-m-d', new \DateTimeZone('Europe/Moscow'));
+                $endDate->setTime(0, 0);
+            }
+
             $totalDays = $startDate->getDiff($endDate)->days;
 
             if ($totalDays === false) {
@@ -310,6 +319,8 @@ class Receiver extends Controller
                 $this->addError(new Error($error, self::DEFAULT_FORM_GENERAL_ERROR_CODE));
                 return;
             }
+
+            $totalDays = abs($totalDays);
 
             $siteId = Context::getCurrent()->getSite();
 
@@ -355,7 +366,7 @@ class Receiver extends Controller
             */
 
             $query = ProductTable::query();
-            $query->setSelect(['ID']);
+            $query->setSelect(['ID', 'MAX_QUANTITY' => 'QUANTITY']);
             $query->where('AVAILABLE', 'Y');
             $query->whereIn('ID', array_keys($arAddedProducts));
             $queryResult = $query->exec();
@@ -363,10 +374,16 @@ class Receiver extends Controller
             while ($arProduct = $queryResult->fetch()) {
                 $firstDayPrice = \CCatalogProduct::GetOptimalPrice($arProduct['ID']);
 
-                $quantity = $arAddedProducts[$arProduct['ID']];
+                $quantity = intval($arAddedProducts[$arProduct['ID']]);
 
-                if (!$firstDayPrice || !$quantity) {
+                if (!$firstDayPrice || $quantity <= 0) {
                     continue;
+                }
+
+                if ($quantity > intval($arProduct['MAX_QUANTITY'])) {
+                    $error = 'Максимально доступное количество товара: "' . $arProduct['MAX_QUANTITY'] . '"';
+                    $this->addError(new Error($error, self::DEFAULT_FIELD_VALIDATION_ERROR_CODE, 'products[' . $arProduct['ID'] . ']'));
+                    return;
                 }
 
                 $firstDayPrice = $firstDayPrice['RESULT_PRICE']['DISCOUNT_PRICE'];
@@ -433,13 +450,21 @@ class Receiver extends Controller
 
             unset($arDataValid['USER_DESCRIPTION']);
 
+            // Swap DATE_START and DATE_END if DATE_START > DATE_END 
+
             $propertyCollection = $order->getPropertyCollection();
 
             foreach ($propertyCollection as $propertyObj) {
                 $propertyCode = $propertyObj->getField('CODE');
 
                 if (isset($arDataValid[$propertyCode])) {
-                    $propertyObj->setValue($arDataValid[$propertyCode]);
+                    if ($propertyCode === 'DATE_START') {
+                        $propertyObj->setValue($startDate->toString());
+                    } elseif ($propertyCode === 'DATE_END') {
+                        $propertyObj->setValue($endDate->toString());
+                    } else {
+                        $propertyObj->setValue($arDataValid[$propertyCode]);
+                    }
                 }
             }
 
@@ -471,29 +496,14 @@ class Receiver extends Controller
                 }
             }
 
-            $useSuccessContent = Option::get(self::DEFAULT_ORDER_MODULE_ID, 'USE_SUCCESS_CONTENT');
+            $cookie = new Cookie('BASKET', Json::encode([]), time() + 60 * 60 * 24 * 7);
 
-            $templateIncludeResult = "";
+            $response = Context::getCurrent()->getResponse();
+            $response->addCookie($cookie);
 
-            if ($useSuccessContent == 'Y') {
-                $templateIncludeResult =  Option::get(self::DEFAULT_ORDER_MODULE_ID, 'SUCCESS_CONTENT_DEFAULT');
+            \LocalRedirect("/personal/orders/" . $result->getId());
 
-                $successFile = Option::get(self::DEFAULT_ORDER_MODULE_ID, 'SUCCESS_FILE');
-
-                if ($successFile) {
-                    ob_start();
-                    $APPLICATION->IncludeFile($successFile, [
-                        'arMutation' => [
-                            'PATH' => $successFile,
-                            'PARAMS' => [],
-                        ]
-                    ], ["SHOW_BORDER" => false, "MODE" => "php"]);
-                    $templateIncludeResult = ob_get_contents();
-                    ob_end_clean();
-                }
-            }
-
-            return $templateIncludeResult;
+            return;
         } catch (\Throwable $th) {
             if (CurrentUser::get()->isAdmin()) {
                 $this->addError(new Error($th->getMessage(), $th->getCode(), $th->getTraceAsString()));

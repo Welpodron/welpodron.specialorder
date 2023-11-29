@@ -168,6 +168,11 @@
             throw new Error(response.statusText);
           }
 
+          if (response.redirected) {
+            window.location.href = response.url;
+            return;
+          }
+
           bitrixResponse = await response.json();
 
           if (!bitrixResponse) {
